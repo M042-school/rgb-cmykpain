@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <title>RGB-CMYK 그림판</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: sans-serif; display: flex; flex-direction: column; align-items: center; }
+    #top-controls { margin: 10px 0; text-align: center; }
+
+    #layout {
+      display: flex;
+      width: 100%;
+      max-width: 1200px;
+    }
+
+    .side-panel {
+      width: 200px;
+      padding: 10px;
+    }
+
+    .center-panel {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+
+    canvas {
+      border: 1px solid #000;
+      background: white;
+      cursor: crosshair;
+      touch-action: none;
+    }
+
+    label {
+      display: block;
+      margin: 5px 0;
+    }
+
+    input[type=range] {
+      width: 100%;
+    }
+
+    button {
+      margin: 3px;
+    }
+
+    button.active {
+      background-color: #333;
+      color: white;
+      font-weight: bold;
+    }
+
+    #brushCircleWrapper {
+      width: 50px;
+      height: 50px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    #brushCircle {
+      border-radius: 50%;
+      background: black;
+      width: 5px;
+      height: 5px;
+      transition: all 0.1s ease;
+    }
+  </style>
+</head>
+<body>
+
+<div id="top-controls">
+  <button id="drawBtn" onclick="setMode('draw')">✏️ 그리기</button>
+  <button id="paintBtn" onclick="setMode('paint')">🪣 페인트</button>
+  <button id="eraseBtn" onclick="setMode('erase')">🧽 지우개</button>
+  <button onclick="undo()">⬅ 이전</button>
+  <button onclick="redo()">➡ 다음</button>
+  <button onclick="clearCanvas()">🗑 전체지우기</button>
+  <button onclick="saveCanvas()">💾 저장</button>
+  <br/>
+  <div style="display: flex; align-items: center; justify-content: center; gap: 10px; margin-top: 5px;">
+    브러쉬 크기:
+    <input type="range" id="brushSize" min="1" max="50" value="5">
+    <span id="brushDisplay">5</span>px
+    <div id="brushCircleWrapper"><div id="brushCircle"></div></div>
+  </div>
+</div>
+
+<div id="layout">
+  <div class="side-panel">
+    <h3>RGB + 투명도</h3>
+    <label>R <input type="range" id="r" min="0" max="255" value="0" style="accent-color: red;"></label>
+    <label>G <input type="range" id="g" min="0" max="255" value="0" style="accent-color: green;"></label>
+    <label>B <input type="range" id="b" min="0" max="255" value="0" style="accent-color: blue;"></label>
+    <label>Alpha <input type="range" id="a" min="0" max="255" value="255" style="accent-color: gray;"></label>
+  </div>
+
+  <div class="center-panel">
+    <canvas id="canvas" width="800" height="800"></canvas>
+  </div>
+
+  <div class="side-panel">
+    <h3>CMYK</h3>
+    <label>C <input type="range" id="c" min="0" max="100" value="100" style="accent-color: cyan;"></label>
+    <label>M <input type="range" id="m" min="0" max="100" value="100" style="accent-color: magenta;"></label>
+    <label>Y <input type="range" id="y" min="0" max="100" value="100" style="accent-color: yellow;"></label>
+    <label>K <input type="range" id="k" min="0" max="100" value="100" style="accent-color: black;"></label>
+  </div>
+</div>
+
+<script>
+  const canvas = document.getElementById("canvas");
+  const ctx = canvas.getContext("2d");
+  let painting = false;
+  let mode = 'draw';
+  let history = [];
+  let redoStack = [];
+
+  const r = document.getElementById("r");
+  const g = document.getElementById("g");
+  const b = document.getElementById("b");
+  const a = document.getElementById("a"); // Alpha
+  const c = document.getElementById("c");
+  const m = document.getElementById("m");
+  const y = document.getElementById("y");
+  const k = document.getElementById("k");
+  const brushSize = document.getElementById("brushSize");
+  const brushDisplay = document.getElementById("brushDisplay");
+  const brushCircle = document.getElementById("brushCircle");
+
+window.onload = () => {
+  updateFromRGB();
+  updateBrushSize();
+  saveState(); // 빈 캔버스 상태라도 저장해둬야 undo/redo 가능
+};
+
+
+  function RGBtoCMYK(r, g, b) {
+    let r1 = r / 255, g1 = g / 255, b1 = b / 255;
+    let k = 1 - Math.max(r1, g1, b1);
+    if (k === 1) return {c: 0, m: 0, y: 0, k: 100};
+    let c = (1 - r1 - k) / (1 - k);
+    let m = (1 - g1 - k) / (1 - k);
+    let y = (1 - b1 - k) / (1 - k);
+    return {
+      c: Math.round(c * 100),
+      m: Math.round(m * 100),
+      y: Math.round(y * 100),
+      k: Math.round(k * 100)
+    };
+  }
+
+  function CMYKtoRGB(c, m, y, k) {
+    c /= 100; m /= 100; y /= 100; k /= 100;
+    let r = 255 * (1 - c) * (1 - k);
+    let g = 255 * (1 - m) * (1 - k);
+    let b = 255 * (1 - y) * (1 - k);
+    return { r: Math.round(r), g: Math.round(g), b: Math.round(b) };
+  }
+
+  function updateFromRGB() {
+    const rgb = { r: +r.value, g: +g.value, b: +b.value };
+    const cmyk = RGBtoCMYK(rgb.r, rgb.g, rgb.b);
+    c.value = cmyk.c; m.value = cmyk.m; y.value = cmyk.y; k.value = cmyk.k;
+    updateColor(rgb.r, rgb.g, rgb.b, +a.value);
+  }
+
+  function updateFromCMYK() {
+    const rgb = CMYKtoRGB(+c.value, +m.value, +y.value, +k.value);
+    r.value = rgb.r; g.value = rgb.g; b.value = rgb.b;
+    updateColor(rgb.r, rgb.g, rgb.b, +a.value);
+  }
+
+  function updateColor(rVal, gVal, bVal, aVal) {
+    const color = `rgba(${rVal},${gVal},${bVal},${(aVal / 255).toFixed(2)})`;
+    brushCircle.style.backgroundColor = color;
+    ctx.strokeStyle = color;
+    ctx.fillStyle = color;
+  }
+
+  function setMode(newMode) {
+  mode = newMode;
+  if (mode === "erase") {
+    ctx.globalCompositeOperation = "destination-out"; // 지우개 모드
+  } else {
+    ctx.globalCompositeOperation = "source-over"; // 일반 드로잉 모드
+  }
+  updateColor(+r.value, +g.value, +b.value, +a.value);
+  document.querySelectorAll("#drawBtn, #paintBtn, #eraseBtn").forEach(btn => btn.classList.remove("active"));
+  document.getElementById(newMode + "Btn").classList.add("active");
+}
+
+
+  function updateBrushSize() {
+    brushDisplay.textContent = brushSize.value;
+    brushCircle.style.width = brushSize.value + "px";
+    brushCircle.style.height = brushSize.value + "px";
+  }
+
+  function saveState() {
+    history.push(canvas.toDataURL());
+    if (history.length > 50) history.shift();
+    redoStack = [];
+  }
+
+ function undo() {
+  if (history.length < 2) return; // 최소 2개 있어야 이전으로 돌아갈 수 있음
+  const current = history.pop(); // 현재 상태 버림
+  redoStack.push(current);       // redo로 이동
+  const img = new Image();
+  img.src = history[history.length - 1]; // 마지막 남은 상태 불러오기
+  img.onload = () => {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(img, 0, 0);
+  };
+}
+
+function redo() {
+  if (redoStack.length === 0) return;
+  const redoImage = redoStack.pop();
+  history.push(redoImage); // redo 이미지 history에 다시 저장
+  const img = new Image();
+  img.src = redoImage;
+  img.onload = () => {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(img, 0, 0);
+  };
+}
+
+
+  function clearCanvas() {
+    saveState();
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+  }
+
+  function saveCanvas() {
+    const link = document.createElement("a");
+    link.download = "drawing.png";
+    link.href = canvas.toDataURL();
+    link.click();
+  }
+
+  function getPixelColor(x, y, data) {
+    const idx = (y * canvas.width + x) * 4;
+    return [data[idx], data[idx+1], data[idx+2], data[idx+3]];
+  }
+
+  function setPixelColor(idx, data, color) {
+    [data[idx], data[idx+1], data[idx+2], data[idx+3]] = color;
+  }
+
+  function colorsMatch(a, b) {
+    return a.every((v, i) => v === b[i]);
+  }
+
+  function getFillColorArray() {
+    return [+r.value, +g.value, +b.value, +a.value];
+  }
+
+  function paintCanvas(x, y) {
+    const fillColor = getFillColorArray();
+    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const data = imageData.data;
+    const targetColor = getPixelColor(x, y, data);
+    if (colorsMatch(targetColor, fillColor)) return;
+
+    const stack = [[x, y]];
+    while (stack.length > 0) {
+      const [cx, cy] = stack.pop();
+      const idx = (cy * canvas.width + cx) * 4;
+      if (!colorsMatch(getPixelColor(cx, cy, data), targetColor)) continue;
+      setPixelColor(idx, data, fillColor);
+      if (cx > 0) stack.push([cx - 1, cy]);
+      if (cx < canvas.width - 1) stack.push([cx + 1, cy]);
+      if (cy > 0) stack.push([cx, cy - 1]);
+      if (cy < canvas.height - 1) stack.push([cx, cy + 1]);
+    }
+    ctx.putImageData(imageData, 0, 0);
+    saveState(); // ← 페인트 후 saveState 를 여기서 호출
+  }
+
+  function startPosition(e) {
+    const rect = canvas.getBoundingClientRect();
+    const x = Math.floor((e.clientX || e.touches[0].clientX) - rect.left);
+    const y = Math.floor((e.clientY || e.touches[0].clientY) - rect.top);
+
+    if (mode === "paint") {
+      paintCanvas(x, y);
+    } else {
+      painting = true;
+      ctx.beginPath();
+      drawLine(x, y);
+    }
+  }
+
+ function endPosition() {
+  if (painting || paintStatePending) {
+    saveState(); // 상태 저장은 그리기/페인트 끝났을 때만!
+    paintStatePending = false;
+  }
+  painting = false;
+  ctx.beginPath();
+}
+
+
+
+  function drawLine(x, y) {
+    if (!painting) return;
+    ctx.lineWidth = brushSize.value;
+    ctx.lineCap = "round";
+    ctx.lineTo(x, y);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+  }
+
+  function handleDraw(e) {
+    const rect = canvas.getBoundingClientRect();
+    const x = (e.clientX || e.touches[0].clientX) - rect.left;
+    const y = (e.clientY || e.touches[0].clientY) - rect.top;
+    drawLine(x, y);
+  }
+
+let paintStatePending = false;
+
+function paintCanvas(x, y) {
+  const fillColor = getFillColorArray();
+  const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const data = imageData.data;
+  const targetColor = getPixelColor(x, y, data);
+  if (colorsMatch(targetColor, fillColor)) return;
+
+  const stack = [[x, y]];
+  while (stack.length > 0) {
+    const [cx, cy] = stack.pop();
+    const idx = (cy * canvas.width + cx) * 4;
+    if (!colorsMatch(getPixelColor(cx, cy, data), targetColor)) continue;
+    setPixelColor(idx, data, fillColor);
+    if (cx > 0) stack.push([cx - 1, cy]);
+    if (cx < canvas.width - 1) stack.push([cx + 1, cy]);
+    if (cy > 0) stack.push([cx, cy - 1]);
+    if (cy < canvas.height - 1) stack.push([cx, cy + 1]);
+  }
+  ctx.putImageData(imageData, 0, 0);
+  paintStatePending = true; // 저장 예약만
+}
+
+
+function endPosition() {
+  if (painting || paintStatePending) {
+    saveState();
+    paintStatePending = false;
+  }
+  painting = false;
+  ctx.beginPath();
+}
+
+
+
+  [r, g, b, a].forEach(el => el.addEventListener("input", updateFromRGB));
+  [c, m, y, k].forEach(el => el.addEventListener("input", updateFromCMYK));
+  brushSize.addEventListener("input", updateBrushSize);
+
+  canvas.addEventListener("mousedown", startPosition);
+  canvas.addEventListener("mousemove", handleDraw);
+  canvas.addEventListener("mouseup", endPosition);
+  canvas.addEventListener("mouseout", endPosition);
+
+  canvas.addEventListener("touchstart", startPosition, { passive: false });
+  canvas.addEventListener("touchmove", handleDraw, { passive: false });
+  canvas.addEventListener("touchend", endPosition);
+
+  updateFromRGB();
+  updateBrushSize();
+</script>
+
+</body>
+</html>
